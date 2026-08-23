@@ -1,7 +1,7 @@
 import {beforeAll, describe, expect, test} from "bun:test"
 import path from "path"
 import {tmpdir} from "node:os"
-import type {NativeToolOutput, ToolAfterHook} from "./test-support"
+import type {OpenCodeToolOutput, ToolAfterHook} from "./test-support"
 import {TEST_PROJECT_ROOT, callAfterHook, createPlugin} from "./test-support"
 
 describe("Glob Tool Result Filtering", () => {
@@ -77,7 +77,7 @@ describe("Glob Tool Result Filtering", () => {
     ]
 
     for (const fixture of fixtures) {
-      const output: NativeToolOutput = {title: fixture.title, output: fixture.source, metadata: {...fixture.metadata}}
+      const output: OpenCodeToolOutput = {title: fixture.title, output: fixture.source, metadata: {...fixture.metadata}}
 
       expect(await callAfterHook(afterHook, "glob", {pattern: "**/*"}, output)).toBeUndefined()
       expect(output).toEqual({title: fixture.title, output: fixture.expectedOutput, metadata: fixture.expectedMetadata})
@@ -191,7 +191,7 @@ describe("Grep Tool Result Filtering", () => {
     ]
 
     for (const fixture of fixtures) {
-      const output: NativeToolOutput = {title: fixture.title, output: fixture.source, metadata: {...fixture.metadata}}
+      const output: OpenCodeToolOutput = {title: fixture.title, output: fixture.source, metadata: {...fixture.metadata}}
 
       expect(await callAfterHook(afterHook, "grep", {pattern: ".*"}, output)).toBeUndefined()
       expect(output).toEqual({title: fixture.title, output: fixture.expectedOutput, metadata: fixture.expectedMetadata})
@@ -203,7 +203,7 @@ describe("Grep Tool Result Filtering", () => {
     const allowedPath = path.join(TEST_PROJECT_ROOT, "index.ts")
     const blockedPath = path.join(TEST_PROJECT_ROOT, "secrets.json")
     const inaccessibleNotice = "(Some paths were inaccessible and skipped)"
-    const output: NativeToolOutput = {
+    const output: OpenCodeToolOutput = {
       title: "v1.3.4 non-truncated grep notice",
       output: [
         "Found 3 matches",
@@ -246,7 +246,7 @@ describe("Grep Tool Result Filtering", () => {
     const blockedRows = Array.from({length: shown / 2}, (_, index) => `  Line ${index + allowedRows.length + 1}: blocked-secret-${index + allowedRows.length + 1}`)
     const inaccessibleNotice = "(Some paths were inaccessible and skipped)"
     const legacyFooter = `(Results truncated: showing ${shown} of ${total} matches (${total - shown} hidden). Consider using a more specific path or pattern.)`
-    const output: NativeToolOutput = {
+    const output: OpenCodeToolOutput = {
       title: "v1.3.4 malformed one-newline notice",
       output: [
         `Found ${total} matches (showing first ${shown})`,
@@ -282,7 +282,7 @@ describe("Grep Tool Result Filtering", () => {
     const blockedRows = Array.from({length: shown / 2}, (_, index) => `  Line ${index + allowedRows.length + 1}: blocked-secret-${index + allowedRows.length + 1}`)
     const inaccessibleNotice = "(Some paths were inaccessible and skipped)"
     const legacyFooter = `(Results truncated: showing ${shown} of ${total} matches (${total - shown} hidden). Consider using a more specific path or pattern.)`
-    const output: NativeToolOutput = {
+    const output: OpenCodeToolOutput = {
       title: "v1.3.4 truncated grep",
       output: [
         `Found ${total} matches (showing first ${shown})`,

@@ -22,7 +22,7 @@ export type NativeMetadata = {
   source?: string
 }
 
-export type NativeToolOutput = {
+export type OpenCodeToolOutput = {
   title: string
   output: string
   metadata: NativeMetadata
@@ -48,7 +48,7 @@ export async function callAfterHook(
   hook: ToolAfterHook,
   tool: string,
   args: ToolArguments,
-  output: NativeToolOutput,
+  output: OpenCodeToolOutput,
 ) {
   return hook(
     {tool, sessionID: "test", callID: "test", args},

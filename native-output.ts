@@ -12,12 +12,12 @@ type NativeToolMetadata = {
   outputPath?: string
 }
 
-type NativeToolOutput = {
+type OpenCodeToolOutput = {
   output: string
   metadata: NativeToolMetadata
 }
 
-export function filterGlobResults(result: NativeToolOutput, isBlocked: (path: string) => boolean): void {
+export function filterGlobResults(result: OpenCodeToolOutput, isBlocked: (path: string) => boolean): void {
   const hasNativeFooter = result.output.endsWith(`\n\n${GLOB_TRUNCATION_FOOTER}`)
   const body = hasNativeFooter
     ? result.output.slice(0, -(`\n\n${GLOB_TRUNCATION_FOOTER}`.length))
@@ -49,7 +49,7 @@ export function filterGlobResults(result: NativeToolOutput, isBlocked: (path: st
   result.metadata.truncated = truncated
 }
 
-export function filterGrepResults(result: NativeToolOutput, isBlocked: (path: string) => boolean): void {
+export function filterGrepResults(result: OpenCodeToolOutput, isBlocked: (path: string) => boolean): void {
   const hasInaccessibleNotice = result.output.endsWith(`\n\n${GREP_INACCESSIBLE_NOTICE}`)
   const outputWithoutNotice = hasInaccessibleNotice
     ? result.output.slice(0, -(`\n\n${GREP_INACCESSIBLE_NOTICE}`.length))

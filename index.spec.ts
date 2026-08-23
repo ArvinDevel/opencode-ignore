@@ -2,7 +2,7 @@ import {beforeAll, describe, expect, test} from "bun:test"
 import path from "path"
 import {mkdtemp, rm} from "node:fs/promises"
 import {tmpdir} from "node:os"
-import type {NativeToolOutput, ToolBeforeHook} from "./test-support"
+import type {OpenCodeToolOutput, ToolBeforeHook} from "./test-support"
 import {TEST_PROJECT_ROOT, callAfterHook, callHook, createPlugin} from "./test-support"
 
 describe("OpenCodeIgnore Plugin", () => {
@@ -73,7 +73,7 @@ describe("Ignore File Loading", () => {
         const beforeHook = plugin["tool.execute.before"]
         const afterHook = plugin["tool.execute.after"]
         const allowedPath = path.join(tempDir, "allowed.txt")
-        const output: NativeToolOutput = {
+        const output: OpenCodeToolOutput = {
           title: "fallback glob",
           output: [allowedPath, path.join(tempDir, "default-only.txt")].join("\n"),
           metadata: {count: 2, truncated: false, trace: "keep"},
@@ -110,7 +110,7 @@ describe("Ignore File Loading", () => {
       await expect(callHook(beforeHook, "read", {filePath: "default-only.txt"})).resolves.toBeUndefined()
 
       for (const tool of ["glob", "grep"] as const) {
-        const output: NativeToolOutput = tool === "glob"
+        const output: OpenCodeToolOutput = tool === "glob"
           ? {
               title: "glob",
               output: [allowedPath, defaultPath, customPath].join("\n"),
@@ -149,7 +149,7 @@ describe("Ignore File Loading", () => {
 
 describe("After Hook Inactive Filtering", () => {
   test("leaves after-hook output unchanged when filtering is inactive", async () => {
-    const unsupportedOutput: NativeToolOutput = {
+    const unsupportedOutput: OpenCodeToolOutput = {
       title: "read title",
       output: "unfiltered read output",
       metadata: {outputPath: "/tmp/unfiltered-read", trace: "keep"},
@@ -165,7 +165,7 @@ describe("After Hook Inactive Filtering", () => {
     try {
       await Bun.write(path.join(tempDir, ".ignore"), "blocked.txt\n")
 
-      const missingSelectedOutput: NativeToolOutput = {
+      const missingSelectedOutput: OpenCodeToolOutput = {
         title: "missing selected ignore",
         output: path.join(tempDir, "blocked.txt"),
         metadata: {count: 1, truncated: false, outputPath: "/tmp/unfiltered-missing-selected", trace: "keep"},
