@@ -2,6 +2,7 @@ import {beforeAll, describe, expect, test} from "bun:test"
 import path from "path"
 import {mkdtemp, rm} from "node:fs/promises"
 import {tmpdir} from "node:os"
+import {pathToFileURL} from "node:url"
 import type {OpenCodeToolOutput, ToolBeforeHook} from "./test-support"
 import {TEST_PROJECT_ROOT, callAfterHook, callHook, createPlugin} from "./test-support"
 
@@ -29,6 +30,48 @@ describe("OpenCodeIgnore Plugin", () => {
     expect(callHook(hook, "list", { path: "." })).resolves.toBeUndefined()
     expect(callHook(hook, "glob", { path: "." })).resolves.toBeUndefined()
     expect(callHook(hook, "grep", { path: "." })).resolves.toBeUndefined()
+  })
+
+  test("built artifact enforces ignore rules under Node", async () => {
+    const tempDir = await mkdtemp(path.join(tmpdir(), "opencode-ignore-node-"))
+
+    try {
+      await Bun.write(path.join(tempDir, ".ignore"), "blocked.txt\n")
+      const build = await Bun.build({
+        entrypoints: [path.join(process.cwd(), "index.ts")],
+        outdir: path.join(tempDir, "dist"),
+        target: "node",
+      })
+      expect(build.success).toBe(true)
+
+      const script = [
+        "const {OpenCodeIgnore} = await import(process.argv[1])",
+        "const root = process.argv[2]",
+        "const hooks = await OpenCodeIgnore({directory: root, worktree: root})",
+        "try {",
+        "  await hooks['tool.execute.before']({tool: 'read'}, {args: {filePath: 'blocked.txt'}})",
+        "  throw new Error('blocked path was allowed')",
+        "} catch (error) {",
+        "  if (!String(error).includes('Access denied')) throw error",
+        "  console.log('BLOCKED')",
+        "}",
+      ].join("\n")
+      const node = Bun.spawn([
+        "node", "--input-type=module", "--eval", script,
+        pathToFileURL(path.join(tempDir, "dist/index.js")).href, tempDir,
+      ], {stdout: "pipe", stderr: "pipe"})
+      const [exitCode, stdout, stderr] = await Promise.all([
+        node.exited,
+        new Response(node.stdout).text(),
+        new Response(node.stderr).text(),
+      ])
+
+      expect(exitCode).toBe(0)
+      expect(stdout).toBe("BLOCKED\n")
+      expect(stderr).toBe("")
+    } finally {
+      await rm(tempDir, {recursive: true, force: true})
+    }
   })
 })
 

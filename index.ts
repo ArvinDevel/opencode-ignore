@@ -1,4 +1,5 @@
 import type {Plugin, PluginInput, PluginOptions} from "@opencode-ai/plugin"
+import {readFile} from "node:fs/promises"
 import ignore from "ignore"
 import {isPathValid} from "ignore"
 import {join, isAbsolute, relative} from "path"
@@ -13,14 +14,15 @@ import {filterGlobResults, filterGrepResults} from "./native-output"
  */
 async function loadIgnore(projectRoot: string, ignoreFile: string): Promise<ReturnType<typeof ignore> | null> {
   const ignorePath = join(projectRoot, ignoreFile)
-  const file = Bun.file(ignorePath)
-  if (await file.exists()) {
-    const ignoreLib = ignore()
-    ignoreLib.add(await file.text())
-    return ignoreLib
-  }
-  
-  return null
+  const patterns = await readFile(ignorePath, "utf8").catch((error: NodeJS.ErrnoException) => {
+    if (error.code === "ENOENT") return null
+    throw error
+  })
+  if (patterns === null) return null
+
+  const ignoreLib = ignore()
+  ignoreLib.add(patterns)
+  return ignoreLib
 }
 
 /**
