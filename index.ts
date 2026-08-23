@@ -1,16 +1,18 @@
-import type {Plugin} from "@opencode-ai/plugin"
+import type {Plugin, PluginInput, PluginOptions} from "@opencode-ai/plugin"
 import ignore from "ignore"
 import {isPathValid} from "ignore"
 import {join, isAbsolute, relative} from "path"
+import {filterGlobResults, filterGrepResults} from "./native-output"
 
 /**
  * Load ignore patterns from project root
- * Uses .ignore file
+ * Uses the configured ignore file
  * @param projectRoot - Absolute path to project root
+ * @param ignoreFile - Ignore filename relative to project root
  * @returns Ignore instance or null if no ignore file exists
  */
-async function loadIgnore(projectRoot: string): Promise<ReturnType<typeof ignore> | null> {
-  const ignorePath = join(projectRoot, ".ignore")
+async function loadIgnore(projectRoot: string, ignoreFile: string): Promise<ReturnType<typeof ignore> | null> {
+  const ignorePath = join(projectRoot, ignoreFile)
   const file = Bun.file(ignorePath)
   if (await file.exists()) {
     const ignoreLib = ignore()
@@ -66,120 +68,14 @@ function normalizePath(targetPath: string, projectRoot: string, isDirectory: boo
   return withSlashPath
 }
 
-/**
- * Check if a path should be blocked by .ignore patterns
- *
- * @param targetPath - Path to check (absolute or relative)
- * @param projectRoot - Absolute path to project root
- * @param isDirectory - Whether the path represents a directory
- * @returns true if path matches ignore patterns (should be blocked), false otherwise
- */
-async function isPathBlocked(targetPath: string, projectRoot: string, isDirectory: boolean): Promise<boolean> {
-  // Load .ignore file (returns null if missing - graceful degradation)
-  const ignoreLib = await loadIgnore(projectRoot)
-  if (!ignoreLib) return false // No .ignore file = allow all access
-  
-  // Normalize path to format required by ignore library
-  const normalizedPath = normalizePath(targetPath, projectRoot, isDirectory)
-  
-  // Check if path matches any ignore pattern
-  return ignoreLib.ignores(normalizedPath)
-}
-
-/**
- * Filter glob tool results to remove blocked files
- * 
- * @param result - Original glob result object
- * @param ignoreLib - Ignore instance with loaded patterns
- * @param projectRoot - Absolute path to project root
- * @returns Filtered result with blocked files removed
- */
-function filterGlobResults(
-  result: any,
-  ignoreLib: ReturnType<typeof ignore>,
-  projectRoot: string
-): any {
-  if (!result?.files || !Array.isArray(result.files)) return result
-  
-  const filteredFiles = result.files.filter((filePath: string) => {
-    try {
-      const normalized = normalizePath(filePath, projectRoot, false)
-      return !ignoreLib.ignores(normalized)
-    } catch {
-      // If normalization fails, filter out the file (safer approach)
-      return false
-    }
-  })
-  
-  return { ...result, files: filteredFiles }
-}
-
-/**
- * Filter grep tool results to remove matches from blocked files
- * 
- * @param result - Original grep result object
- * @param ignoreLib - Ignore instance with loaded patterns
- * @param projectRoot - Absolute path to project root
- * @returns Filtered result with matches from blocked files removed
- */
-function filterGrepResults(
-  result: any,
-  ignoreLib: ReturnType<typeof ignore>,
-  projectRoot: string
-): any {
-  if (!result?.matches || !Array.isArray(result.matches)) return result
-  
-  const filteredMatches = result.matches.filter((match: any) => {
-    if (!match?.file) return true  // Keep matches without file info
-    
-    try {
-      const normalized = normalizePath(match.file, projectRoot, false)
-      return !ignoreLib.ignores(normalized)
-    } catch {
-      // If normalization fails, filter out the match (safer approach)
-      return false
-    }
-  })
-  
-  return { ...result, matches: filteredMatches }
-}
-
-/**
- * Filter tool results to remove paths blocked by .ignore patterns
- * Used in post-execution hook to prevent glob/grep from exposing sensitive files
- *
- * @param tool - Tool name (glob or grep)
- * @param result - Original tool result
- * @param projectRoot - Absolute path to project root
- * @returns Filtered result with blocked paths removed
- */
-async function filterResults(
-  tool: string,
-  result: any,
-  projectRoot: string
-): Promise<any> {
-  // Only filter glob and grep tools
-  if (tool !== "glob" && tool !== "grep") return result
-  
-  // Load ignore patterns
-  const ignoreLib = await loadIgnore(projectRoot)
-  if (!ignoreLib) return result  // No filtering if no .ignore
-  
-  // Filter based on tool type
-  if (tool === "glob") {
-    return filterGlobResults(result, ignoreLib, projectRoot)
-  }
-  
-  if (tool === "grep") {
-    return filterGrepResults(result, ignoreLib, projectRoot)
-  }
-  
-  return result
-}
-
 interface PathInfo {
   path: string
   isDirectory: boolean
+}
+
+interface ToolArgs {
+  filePath?: string
+  path?: string
 }
 
 /**
@@ -198,17 +94,17 @@ interface PathInfo {
  * @param args - Tool arguments object
  * @returns PathInfo with path and directory flag, or null if tool unsupported
  */
-function extractPathFromTool(tool: string, args: Record<string, unknown>): PathInfo | null {
+function extractPathFromTool(tool: string, args: ToolArgs): PathInfo | null {
   // File operations - operate on individual files
-  if (tool === "read") return args.filePath ? {path: args.filePath as string, isDirectory: false} : null
-  if (tool === "write") return args.filePath ? {path: args.filePath as string, isDirectory: false} : null
-  if (tool === "edit") return args.filePath ? {path: args.filePath as string, isDirectory: false} : null
+  if (tool === "read") return args.filePath ? {path: args.filePath, isDirectory: false} : null
+  if (tool === "write") return args.filePath ? {path: args.filePath, isDirectory: false} : null
+  if (tool === "edit") return args.filePath ? {path: args.filePath, isDirectory: false} : null
   
   // Directory operations - search/list within directories
   // Default to "." (project root) if path not specified
-  if (tool === "glob") return {path: (args.path as string) || ".", isDirectory: true}
-  if (tool === "grep") return {path: (args.path as string) || ".", isDirectory: true}
-  if (tool === "list") return {path: (args.path as string) || ".", isDirectory: true}
+  if (tool === "glob") return {path: args.path || ".", isDirectory: true}
+  if (tool === "grep") return {path: args.path || ".", isDirectory: true}
+  if (tool === "list") return {path: args.path || ".", isDirectory: true}
   
   // Unknown tool - no path checking needed
   return null
@@ -236,9 +132,22 @@ function extractPathFromTool(tool: string, args: Record<string, unknown>): PathI
  * @param context.worktree - Git worktree path (preferred over directory)
  * @returns Plugin hooks object
  */
-export const OpenCodeIgnore: Plugin = async ({project, client, $, directory, worktree}) => {
+type OpenCodeIgnoreInput = Pick<PluginInput, "directory" | "worktree">
+
+export const OpenCodeIgnore = (async ({directory, worktree}: OpenCodeIgnoreInput, options?: PluginOptions) => {
   // Prefer worktree (git root) over directory for multi-worktree repos
   const projectRoot = worktree || directory
+  const candidate = options?.ignoreFile
+  const candidateString = Object(candidate) === candidate ? "" : String(candidate)
+  const configuredIgnoreFile = candidateString === candidate ? candidateString.trim() : ""
+  const isProjectRootFile = configuredIgnoreFile !== ""
+    && configuredIgnoreFile !== "."
+    && configuredIgnoreFile !== ".."
+    && !isAbsolute(configuredIgnoreFile)
+    && !configuredIgnoreFile.includes("/")
+    && !configuredIgnoreFile.includes("\\")
+    && !configuredIgnoreFile.includes("\0")
+  const ignoreFile = isProjectRootFile ? configuredIgnoreFile : ".ignore"
   
   return {
     /**
@@ -253,9 +162,12 @@ export const OpenCodeIgnore: Plugin = async ({project, client, $, directory, wor
       
       // Always allow project root to prevent blocking entire project
       if (pathInfo.path === ".") return
-      
-      // Check if path matches any ignore pattern
-      if (await isPathBlocked(pathInfo.path, projectRoot, pathInfo.isDirectory)) {
+
+      const ignoreLib = await loadIgnore(projectRoot, ignoreFile)
+      if (!ignoreLib) return
+
+      const normalizedPath = normalizePath(pathInfo.path, projectRoot, pathInfo.isDirectory)
+      if (ignoreLib.ignores(normalizedPath)) {
         throw new Error(`Access denied: ${pathInfo.path} blocked by ignore file. Do NOT try to read this. Access restricted.`)
       }
     },
@@ -264,12 +176,26 @@ export const OpenCodeIgnore: Plugin = async ({project, client, $, directory, wor
      * Hook that runs after tool execution
      * Filters glob/grep results to remove blocked files
      */
-    "tool.execute.after": async ({tool}, context) => {
-      // Only process glob and grep tools
-      if (tool !== "glob" && tool !== "grep") return context.output
+    "tool.execute.after": async ({tool}, output) => {
+      if (tool !== "glob" && tool !== "grep") return
+
+      const ignoreLib = await loadIgnore(projectRoot, ignoreFile)
+      if (!ignoreLib) return
+
+      const isBlocked = (filePath: string): boolean => {
+        try {
+          return ignoreLib.ignores(normalizePath(filePath, projectRoot, false))
+        } catch {
+          return true
+        }
+      }
       
-      // Filter results to remove blocked files
-      return await filterResults(tool, context.output, projectRoot)
+      if (tool === "glob") {
+        filterGlobResults(output, isBlocked)
+        return
+      }
+
+      filterGrepResults(output, isBlocked)
     }
   }
-}
+}) satisfies Plugin

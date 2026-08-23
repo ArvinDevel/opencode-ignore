@@ -1,40 +1,21 @@
-import { test, expect, describe, beforeAll } from "bun:test"
-import { OpenCodeIgnore } from "./index"
+import {beforeAll, describe, expect, test} from "bun:test"
 import path from "path"
-
-// Test data directory is the project root for all tests
-const TEST_PROJECT_ROOT = path.join(process.cwd(), "test-data")
-
-// Helper to create plugin instance
-async function createPlugin(projectRoot = TEST_PROJECT_ROOT) {
-  return await OpenCodeIgnore({
-    project: {} as any,
-    client: {} as any,
-    $: {} as any,
-    directory: projectRoot,
-    worktree: projectRoot,
-  })
-}
-
-// Helper to call hook
-async function callHook(hook: any, tool: string, args: any) {
-  return await hook(
-    { tool, sessionID: "test", callID: "test" },
-    { args }
-  )
-}
+import {mkdtemp, rm} from "node:fs/promises"
+import {tmpdir} from "node:os"
+import type {NativeToolOutput, ToolBeforeHook} from "./test-support"
+import {TEST_PROJECT_ROOT, callAfterHook, callHook, createPlugin} from "./test-support"
 
 describe("OpenCodeIgnore Plugin", () => {
   test("plugin loads and registers hook", async () => {
     const plugin = await createPlugin()
     expect(plugin["tool.execute.before"]).toBeDefined()
-    expect(typeof plugin["tool.execute.before"]).toBe("function")
+    expect(plugin["tool.execute.before"]).toBeInstanceOf(Function)
   })
 
   test("graceful degradation - missing ignore file allows all", async () => {
     const tempDir = "/tmp/test-no-ignore-" + Date.now()
     const plugin = await createPlugin(tempDir)
-    const hook = plugin["tool.execute.before"]!
+    const hook = plugin["tool.execute.before"]
     
     // Should not throw even though no ignore file exists
     expect(callHook(hook, "read", { filePath: "secrets.json" })).resolves.toBeUndefined()
@@ -42,7 +23,7 @@ describe("OpenCodeIgnore Plugin", () => {
 
   test("project root (.) is always allowed", async () => {
     const plugin = await createPlugin()
-    const hook = plugin["tool.execute.before"]!
+    const hook = plugin["tool.execute.before"]
     
     // All directory operations on root should be allowed
     expect(callHook(hook, "list", { path: "." })).resolves.toBeUndefined()
@@ -55,7 +36,7 @@ describe("Ignore File Loading", () => {
   test("uses .ignore when available", async () => {
     // Current project has .ignore, should block secrets.json
     const plugin = await createPlugin()
-    const hook = plugin["tool.execute.before"]!
+    const hook = plugin["tool.execute.before"]
     
     expect(callHook(hook, "read", { filePath: "secrets.json" }))
       .rejects.toThrow(/Access denied/)
@@ -68,22 +49,143 @@ describe("Ignore File Loading", () => {
     await Bun.write(tempDir + "/.ignore", "blocked.txt\n")
     
     const plugin = await createPlugin(tempDir)
-    const hook = plugin["tool.execute.before"]!
+    const hook = plugin["tool.execute.before"]
     
     expect(callHook(hook, "read", { filePath: "blocked.txt" }))
       .rejects.toThrow(/Access denied/)
     expect(callHook(hook, "read", { filePath: "allowed.txt" }))
       .resolves.toBeUndefined()
   })
+
+  test("falls back to .ignore for invalid ignoreFile values in both hooks", async () => {
+    const invalidIgnoreFiles = [
+      "  ", 42, "../outside.ignore", path.join(tmpdir(), "outside.ignore"),
+      "nested/.ignore", "nested\\.ignore", ".", "..", ".ignore\0other",
+    ]
+
+    for (const ignoreFile of invalidIgnoreFiles) {
+      const tempDir = await mkdtemp(path.join(tmpdir(), "opencode-ignore-fallback-"))
+
+      try {
+        await Bun.write(path.join(tempDir, ".ignore"), "default-only.txt\n")
+
+        const plugin = await createPlugin(tempDir, {ignoreFile})
+        const beforeHook = plugin["tool.execute.before"]
+        const afterHook = plugin["tool.execute.after"]
+        const allowedPath = path.join(tempDir, "allowed.txt")
+        const output: NativeToolOutput = {
+          title: "fallback glob",
+          output: [allowedPath, path.join(tempDir, "default-only.txt")].join("\n"),
+          metadata: {count: 2, truncated: false, trace: "keep"},
+        }
+
+        await expect(callHook(beforeHook, "read", {filePath: "default-only.txt"})).rejects.toThrow(/Access denied/)
+        expect(await callAfterHook(afterHook, "glob", {}, output)).toBeUndefined()
+        expect(output).toEqual({
+          title: "fallback glob",
+          output: allowedPath,
+          metadata: {count: 1, truncated: false, trace: "keep"},
+        })
+      } finally {
+        await rm(tempDir, {recursive: true, force: true})
+      }
+    }
+  })
+
+  test("uses a trimmed configured ignoreFile in both hooks", async () => {
+    const tempDir = await mkdtemp(path.join(tmpdir(), "opencode-ignore-filter-"))
+
+    try {
+      await Bun.write(path.join(tempDir, ".ignore"), "default-only.txt\n")
+      await Bun.write(path.join(tempDir, ".cursorignore"), "custom-only.txt\n")
+
+      const plugin = await createPlugin(tempDir, {ignoreFile: "  .cursorignore  "})
+      const beforeHook = plugin["tool.execute.before"]
+      const afterHook = plugin["tool.execute.after"]
+      const allowedPath = path.join(tempDir, "allowed.txt")
+      const defaultPath = path.join(tempDir, "default-only.txt")
+      const customPath = path.join(tempDir, "custom-only.txt")
+
+      await expect(callHook(beforeHook, "read", {filePath: "custom-only.txt"})).rejects.toThrow(/Access denied/)
+      await expect(callHook(beforeHook, "read", {filePath: "default-only.txt"})).resolves.toBeUndefined()
+
+      for (const tool of ["glob", "grep"] as const) {
+        const output: NativeToolOutput = tool === "glob"
+          ? {
+              title: "glob",
+              output: [allowedPath, defaultPath, customPath].join("\n"),
+              metadata: {count: 3, source: "native", truncated: false},
+            }
+          : {
+              title: "grep",
+              output: [
+                "Found 3 matches", `${allowedPath}:`, "  Line 1: allowed", "",
+                `${defaultPath}:`, "  Line 2: default", "", `${customPath}:`, "  Line 3: custom",
+              ].join("\n"),
+              metadata: {matches: 3, source: "native", truncated: false},
+            }
+
+        expect(await callAfterHook(afterHook, tool, {}, output)).toBeUndefined()
+        expect(output).toEqual(tool === "glob"
+          ? {
+              title: "glob",
+              output: [allowedPath, defaultPath].join("\n"),
+              metadata: {count: 2, source: "native", truncated: false},
+            }
+          : {
+              title: "grep",
+              output: [
+                "Found 2 matches", `${allowedPath}:`, "  Line 1: allowed", "",
+                `${defaultPath}:`, "  Line 2: default",
+              ].join("\n"),
+              metadata: {matches: 2, source: "native", truncated: false},
+            })
+      }
+    } finally {
+      await rm(tempDir, {recursive: true, force: true})
+    }
+  })
+})
+
+describe("After Hook Inactive Filtering", () => {
+  test("leaves after-hook output unchanged when filtering is inactive", async () => {
+    const unsupportedOutput: NativeToolOutput = {
+      title: "read title",
+      output: "unfiltered read output",
+      metadata: {outputPath: "/tmp/unfiltered-read", trace: "keep"},
+    }
+    const unsupportedBefore = structuredClone(unsupportedOutput)
+    const unsupportedHook = (await createPlugin())["tool.execute.after"]
+
+    expect(await callAfterHook(unsupportedHook, "read", {filePath: "secrets.json"}, unsupportedOutput)).toBeUndefined()
+    expect(unsupportedOutput).toEqual(unsupportedBefore)
+
+    const tempDir = await mkdtemp(path.join(tmpdir(), "opencode-ignore-missing-selected-"))
+
+    try {
+      await Bun.write(path.join(tempDir, ".ignore"), "blocked.txt\n")
+
+      const missingSelectedOutput: NativeToolOutput = {
+        title: "missing selected ignore",
+        output: path.join(tempDir, "blocked.txt"),
+        metadata: {count: 1, truncated: false, outputPath: "/tmp/unfiltered-missing-selected", trace: "keep"},
+      }
+      const missingSelectedBefore = structuredClone(missingSelectedOutput)
+      const missingSelectedHook = (await createPlugin(tempDir, {ignoreFile: ".cursorignore"}))["tool.execute.after"]
+
+      expect(await callAfterHook(missingSelectedHook, "glob", {}, missingSelectedOutput)).toBeUndefined()
+      expect(missingSelectedOutput).toEqual(missingSelectedBefore)
+    } finally {
+      await rm(tempDir, {recursive: true, force: true})
+    }
+  })
 })
 
 describe("File I/O Tools Protection", () => {
-  let plugin: any
-  let hook: any
+  let hook: ToolBeforeHook
 
   beforeAll(async () => {
-    plugin = await createPlugin()
-    hook = plugin["tool.execute.before"]
+    hook = (await createPlugin())["tool.execute.before"]
   })
 
   describe("read tool", () => {
@@ -150,12 +252,10 @@ describe("File I/O Tools Protection", () => {
 })
 
 describe("Search/List Tools Protection", () => {
-  let plugin: any
-  let hook: any
+  let hook: ToolBeforeHook
 
   beforeAll(async () => {
-    plugin = await createPlugin()
-    hook = plugin["tool.execute.before"]
+    hook = (await createPlugin())["tool.execute.before"]
   })
 
   describe("glob tool", () => {
@@ -218,12 +318,10 @@ describe("Search/List Tools Protection", () => {
 })
 
 describe("Pattern Types", () => {
-  let plugin: any
-  let hook: any
+  let hook: ToolBeforeHook
 
   beforeAll(async () => {
-    plugin = await createPlugin()
-    hook = plugin["tool.execute.before"]
+    hook = (await createPlugin())["tool.execute.before"]
   })
 
   describe("absolute patterns", () => {
@@ -309,12 +407,10 @@ describe("Pattern Types", () => {
 })
 
 describe("Path Normalization", () => {
-  let plugin: any
-  let hook: any
+  let hook: ToolBeforeHook
 
   beforeAll(async () => {
-    plugin = await createPlugin()
-    hook = plugin["tool.execute.before"]
+    hook = (await createPlugin())["tool.execute.before"]
   })
 
   describe("absolute paths", () => {
@@ -365,12 +461,10 @@ describe("Path Normalization", () => {
 })
 
 describe("Edge Cases", () => {
-  let plugin: any
-  let hook: any
+  let hook: ToolBeforeHook
 
   beforeAll(async () => {
-    plugin = await createPlugin()
-    hook = plugin["tool.execute.before"]
+    hook = (await createPlugin())["tool.execute.before"]
   })
 
   test("handles undefined path gracefully", async () => {
@@ -399,21 +493,20 @@ describe("Edge Cases", () => {
     try {
       await callHook(hook, "read", { filePath: "secrets.json" })
       expect(false).toBe(true) // Should not reach here
-    } catch (e: any) {
-      expect(e.message).toContain("secrets.json")
-      expect(e.message).toContain("blocked by ignore file")
-      expect(e.message).toContain("Access denied")
+    } catch (error) {
+      if (!(error instanceof Error)) throw error
+      expect(error.message).toContain("secrets.json")
+      expect(error.message).toContain("blocked by ignore file")
+      expect(error.message).toContain("Access denied")
     }
   })
 })
 
 describe("Real-world Scenarios", () => {
-  let plugin: any
-  let hook: any
+  let hook: ToolBeforeHook
 
   beforeAll(async () => {
-    plugin = await createPlugin()
-    hook = plugin["tool.execute.before"]
+    hook = (await createPlugin())["tool.execute.before"]
   })
 
   test("allows normal development workflow", async () => {
@@ -453,284 +546,5 @@ describe("Real-world Scenarios", () => {
     // But block bamboo-specs inside any directory
     expect(callHook(hook, "read", { filePath: "src/bamboo-specs/plan.yml" }))
       .rejects.toThrow(/Access denied/)
-  })
-})
-
-describe("Glob Tool Result Filtering", () => {
-  let plugin: any
-  let afterHook: any
-
-  beforeAll(async () => {
-    plugin = await createPlugin()
-    afterHook = plugin["tool.execute.after"]
-  })
-
-  test("filters blocked files from glob results", async () => {
-    const mockOutput = {
-      files: [
-        "index.ts",              // ALLOWED
-        "secrets.json",          // BLOCKED
-        "credentials.json",      // BLOCKED
-        "README.md",             // ALLOWED
-        ".env",                  // BLOCKED
-        "config.local.json"      // ALLOWED (negation)
-      ]
-    }
-
-    const filtered = await afterHook(
-      { tool: "glob", sessionID: "test", callID: "test" },
-      { args: { pattern: "**/*" }, output: mockOutput }
-    )
-
-    expect(filtered.files).toHaveLength(3)
-    expect(filtered.files).toContain("index.ts")
-    expect(filtered.files).toContain("README.md")
-    expect(filtered.files).toContain("config.local.json")
-    expect(filtered.files).not.toContain("secrets.json")
-    expect(filtered.files).not.toContain("credentials.json")
-    expect(filtered.files).not.toContain(".env")
-  })
-
-  test("filters certificate and key files", async () => {
-    const mockOutput = {
-      files: [
-        "server.crt",
-        "private.key",
-        "ca.pem",
-        "README.md"
-      ]
-    }
-
-    const filtered = await afterHook(
-      { tool: "glob", sessionID: "test", callID: "test" },
-      { args: { pattern: "**/*" }, output: mockOutput }
-    )
-
-    expect(filtered.files).toHaveLength(1)
-    expect(filtered.files).toContain("README.md")
-  })
-
-  test("returns empty array when all files blocked", async () => {
-    const mockOutput = {
-      files: [
-        "secrets.json",
-        "credentials.json",
-        ".env",
-        "private.key"
-      ]
-    }
-
-    const filtered = await afterHook(
-      { tool: "glob", sessionID: "test", callID: "test" },
-      { args: { pattern: "**/*" }, output: mockOutput }
-    )
-
-    expect(filtered.files).toHaveLength(0)
-    expect(filtered.files).toEqual([])
-  })
-
-  test("handles glob results with no files", async () => {
-    const mockOutput = { files: [] }
-
-    const filtered = await afterHook(
-      { tool: "glob", sessionID: "test", callID: "test" },
-      { args: { pattern: "**/*.xyz" }, output: mockOutput }
-    )
-
-    expect(filtered.files).toEqual([])
-  })
-
-  test("handles malformed glob results gracefully", async () => {
-    const mockOutput = { files: null }
-
-    const filtered = await afterHook(
-      { tool: "glob", sessionID: "test", callID: "test" },
-      { args: { pattern: "**/*" }, output: mockOutput }
-    )
-
-    expect(filtered).toEqual(mockOutput)
-  })
-
-  test("respects negation patterns", async () => {
-    const mockOutput = {
-      files: [
-        "config.local.json",      // ALLOWED (negation)
-        "settings.local.jsonc",   // ALLOWED (negation)
-        ".local/impl.md",         // ALLOWED (negation)
-        "secrets.json"            // BLOCKED
-      ]
-    }
-
-    const filtered = await afterHook(
-      { tool: "glob", sessionID: "test", callID: "test" },
-      { args: { pattern: "**/*" }, output: mockOutput }
-    )
-
-    expect(filtered.files).toHaveLength(3)
-    expect(filtered.files).toContain("config.local.json")
-    expect(filtered.files).toContain("settings.local.jsonc")
-    expect(filtered.files).toContain(".local/impl.md")
-  })
-
-  test("does not filter non-glob tools", async () => {
-    const mockOutput = {
-      files: ["secrets.json", "index.ts"]
-    }
-
-    const filtered = await afterHook(
-      { tool: "read", sessionID: "test", callID: "test" },
-      { args: {}, output: mockOutput }
-    )
-
-    // Should return unchanged for non-glob tools
-    expect(filtered).toEqual(mockOutput)
-  })
-})
-
-describe("Grep Tool Result Filtering", () => {
-  let plugin: any
-  let afterHook: any
-
-  beforeAll(async () => {
-    plugin = await createPlugin()
-    afterHook = plugin["tool.execute.after"]
-  })
-
-  test("filters blocked files from grep results", async () => {
-    const mockOutput = {
-      matches: [
-        { file: "index.ts", line: 10, column: 5, match: "export" },           // ALLOWED
-        { file: "secrets.json", line: 3, column: 10, match: "password" },     // BLOCKED
-        { file: "README.md", line: 1, column: 0, match: "# opencode" },       // ALLOWED
-        { file: ".env", line: 5, column: 0, match: "API_KEY=secret" }         // BLOCKED
-      ]
-    }
-
-    const filtered = await afterHook(
-      { tool: "grep", sessionID: "test", callID: "test" },
-      { args: { pattern: ".*" }, output: mockOutput }
-    )
-
-    expect(filtered.matches).toHaveLength(2)
-    expect(filtered.matches[0].file).toBe("index.ts")
-    expect(filtered.matches[1].file).toBe("README.md")
-  })
-
-  test("does not leak any info about blocked files", async () => {
-    const mockOutput = {
-      matches: [
-        { file: "credentials.json", line: 7, column: 15, match: "admin_password: secret123" },
-        { file: "private.key", line: 1, column: 0, match: "-----BEGIN PRIVATE KEY-----" },
-        { file: "index.ts", line: 50, column: 10, match: "const config" }
-      ]
-    }
-
-    const filtered = await afterHook(
-      { tool: "grep", sessionID: "test", callID: "test" },
-      { args: { pattern: ".*" }, output: mockOutput }
-    )
-
-    // Only allowed file should remain
-    expect(filtered.matches).toHaveLength(1)
-    expect(filtered.matches[0].file).toBe("index.ts")
-    
-    // Ensure no info from blocked files leaks
-    const resultStr = JSON.stringify(filtered)
-    expect(resultStr).not.toContain("credentials.json")
-    expect(resultStr).not.toContain("private.key")
-    expect(resultStr).not.toContain("secret123")
-    expect(resultStr).not.toContain("PRIVATE KEY")
-  })
-
-  test("returns empty matches when all blocked", async () => {
-    const mockOutput = {
-      matches: [
-        { file: "secrets.json", line: 1, match: "secret" },
-        { file: ".env", line: 2, match: "password" },
-        { file: "private.key", line: 5, match: "key data" }
-      ]
-    }
-
-    const filtered = await afterHook(
-      { tool: "grep", sessionID: "test", callID: "test" },
-      { args: { pattern: "secret" }, output: mockOutput }
-    )
-
-    expect(filtered.matches).toHaveLength(0)
-    expect(filtered.matches).toEqual([])
-  })
-
-  test("handles grep results with no matches", async () => {
-    const mockOutput = { matches: [] }
-
-    const filtered = await afterHook(
-      { tool: "grep", sessionID: "test", callID: "test" },
-      { args: { pattern: "nonexistent" }, output: mockOutput }
-    )
-
-    expect(filtered.matches).toEqual([])
-  })
-
-  test("handles malformed grep results gracefully", async () => {
-    const mockOutput = { matches: null }
-
-    const filtered = await afterHook(
-      { tool: "grep", sessionID: "test", callID: "test" },
-      { args: { pattern: "test" }, output: mockOutput }
-    )
-
-    expect(filtered).toEqual(mockOutput)
-  })
-
-  test("keeps matches without file info", async () => {
-    const mockOutput = {
-      matches: [
-        { file: "index.ts", line: 10, match: "export" },
-        { line: 5, match: "some match without file" },  // No file property
-        { file: "secrets.json", line: 3, match: "password" }
-      ]
-    }
-
-    const filtered = await afterHook(
-      { tool: "grep", sessionID: "test", callID: "test" },
-      { args: { pattern: ".*" }, output: mockOutput }
-    )
-
-    expect(filtered.matches).toHaveLength(2)
-    expect(filtered.matches[0].file).toBe("index.ts")
-    expect(filtered.matches[1]).not.toHaveProperty("file")
-  })
-
-  test("respects negation patterns in grep", async () => {
-    const mockOutput = {
-      matches: [
-        { file: "config.local.json", line: 1, match: "config" },    // ALLOWED (negation)
-        { file: ".local/notes.md", line: 5, match: "notes" },       // ALLOWED (negation)
-        { file: "secrets.json", line: 2, match: "secret" }          // BLOCKED
-      ]
-    }
-
-    const filtered = await afterHook(
-      { tool: "grep", sessionID: "test", callID: "test" },
-      { args: { pattern: ".*" }, output: mockOutput }
-    )
-
-    expect(filtered.matches).toHaveLength(2)
-    expect(filtered.matches[0].file).toBe("config.local.json")
-    expect(filtered.matches[1].file).toBe(".local/notes.md")
-  })
-
-  test("does not filter non-grep tools", async () => {
-    const mockOutput = {
-      matches: [{ file: "secrets.json", line: 1, match: "secret" }]
-    }
-
-    const filtered = await afterHook(
-      { tool: "write", sessionID: "test", callID: "test" },
-      { args: {}, output: mockOutput }
-    )
-
-    // Should return unchanged for non-grep tools
-    expect(filtered).toEqual(mockOutput)
   })
 })
