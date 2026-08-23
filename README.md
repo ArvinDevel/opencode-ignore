@@ -35,7 +35,7 @@ To share another tool's ignore file, configure the plugin as a tuple:
 }
 ```
 
-`ignoreFile` must be a filename in the project root. A valid override replaces `.ignore`; the files are not merged. Blank, non-string, absolute, or directory-traversing values fall back to `.ignore`.
+`ignoreFile` accepts only a filename in the project root; paths such as `config/.ignore` are invalid. A valid override replaces `.ignore`; the files are not merged. If the configured file does not exist, the plugin does not fall back to `.ignore`; ignore protection is disabled. Blank, non-string, absolute, or otherwise invalid values fall back to `.ignore`.
 
 Create the selected ignore file in your project root with patterns to block:
 
