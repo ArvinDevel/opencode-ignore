@@ -1,6 +1,8 @@
 # opencode-ignore
 
-OpenCode plugin to restrict AI access to files and directories using `.ignore` patterns (gitignore-style).
+OpenCode plugin to restrict AI access to files and directories using configurable gitignore-style patterns.
+
+> **Disclaimer:** `opencode-ignore` is an independent project. It is not built by the OpenCode team and is not affiliated with OpenCode.
 
 ## Usage
 
@@ -15,7 +17,27 @@ Add to your OpenCode configuration (`~/.config/opencode/opencode.json`):
 }
 ```
 
-Create a `.ignore` file in your project root with patterns to block:
+This zero-config form reads `.ignore` from the project root.
+
+To share another tool's ignore file, configure the plugin as a tuple:
+
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "plugin": [
+    [
+      "opencode-ignore",
+      {
+        "ignoreFile": ".cursorignore"
+      }
+    ]
+  ]
+}
+```
+
+`ignoreFile` must be a filename in the project root. A valid override replaces `.ignore`; the files are not merged. Blank, non-string, absolute, or directory-traversing values fall back to `.ignore`.
+
+Create the selected ignore file in your project root with patterns to block:
 
 ```gitignore
 # Block specific directory
@@ -33,9 +55,9 @@ Create a `.ignore` file in your project root with patterns to block:
 !config.local.json
 ```
 
-## `.ignore` Format
+## Ignore File Format
 
-The `.ignore` file follows gitignore-style syntax powered by the [`ignore`](https://github.com/kaelzhang/node-ignore) package.
+The selected file follows gitignore-style syntax powered by the [`ignore`](https://github.com/kaelzhang/node-ignore) package.
 
 ### Pattern Types
 
@@ -153,7 +175,7 @@ The plugin protects the following OpenCode native tools:
 ## How It Works
 
 ### Pre-execution Protection
-1. Plugin loads `.ignore` file from project root before tool execution
+1. Plugin loads the selected ignore file from project root before tool execution
 2. Tool paths are normalized to relative paths from project root
 3. Paths are checked against ignore patterns using the `ignore` library
 4. If matched, tool execution is blocked with clear error message
@@ -161,12 +183,13 @@ The plugin protects the following OpenCode native tools:
 ### Post-execution Filtering (glob/grep)
 For `glob` and `grep` tools, additional protection filters results:
 1. Tool executes normally (searching allowed directories)
-2. Results are filtered to remove any files matching `.ignore` patterns
+2. Results are filtered to remove any files matching the selected patterns
 3. Blocked files are completely removed from output (no partial data leakage)
 4. Empty results returned if all matches are filtered
 
 ### Graceful Degradation
-- If `.ignore` missing, all access is allowed
+- If the selected ignore file is missing, all access is allowed
+- If `ignoreFile` is invalid, the plugin falls back to `.ignore`
 - Project root (`.`) is always accessible
 
 ### Error Messages
@@ -202,6 +225,8 @@ Tests cover:
 - Path normalization edge cases
 - All supported native tools
 - Missing `.ignore` graceful degradation
+- Default and custom ignore filename selection
+- Safe fallback for invalid custom filenames
 
 ## Development
 
