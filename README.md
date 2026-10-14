@@ -1,6 +1,8 @@
 # opencode-ignore
 
-OpenCode plugin to restrict AI access to files and directories using `.ignore` patterns (gitignore-style).
+OpenCode v1 plugin to restrict AI access to files and directories using `.ignore` patterns (gitignore-style).
+
+> **Disclaimer:** `opencode-ignore` is an independent project. It is not built by the OpenCode team and is not affiliated with OpenCode.
 
 ## Usage
 
