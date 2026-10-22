@@ -2,7 +2,7 @@ import {Plugin} from "@opencode/plugin"
 import ignore from "ignore"
 import {isPathValid} from "ignore"
 import {join, isAbsolute, relative, dirname} from "path"
-import {stat} from "node:fs/promises"
+import {stat, readFile} from "node:fs/promises"
 
 type IgnoreLib = ReturnType<typeof ignore>
 
@@ -37,10 +37,15 @@ interface FilteredOutput {
  * @returns Ignore source with the pattern root, or null if no .ignore exists
  */
 async function findIgnore(directory: string, stopAt: string): Promise<IgnoreSource | null> {
-  const file = Bun.file(join(directory, ".ignore"))
-  if (await file.exists()) {
+  // node:fs/promises instead of Bun.file so this also runs where the Bun
+  // global is unavailable (for example the OpenCode desktop app).
+  const source = await readFile(join(directory, ".ignore"), "utf8").catch((error: NodeJS.ErrnoException) => {
+    if (error.code === "ENOENT" || error.code === "EISDIR" || error.code === "ENOTDIR") return null
+    throw error
+  })
+  if (source !== null) {
     const lib = ignore()
-    lib.add(await file.text())
+    lib.add(source)
     return {lib, root: directory}
   }
 

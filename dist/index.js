@@ -348,12 +348,16 @@ var import_ignore = __toESM(require_ignore(), 1);
 var import_ignore2 = __toESM(require_ignore(), 1);
 import { Plugin } from "@opencode/plugin";
 import { join, isAbsolute, relative, dirname } from "path";
-import { stat } from "node:fs/promises";
+import { stat, readFile } from "node:fs/promises";
 async function findIgnore(directory, stopAt) {
-  const file = Bun.file(join(directory, ".ignore"));
-  if (await file.exists()) {
+  const source = await readFile(join(directory, ".ignore"), "utf8").catch((error) => {
+    if (error.code === "ENOENT" || error.code === "EISDIR" || error.code === "ENOTDIR")
+      return null;
+    throw error;
+  });
+  if (source !== null) {
     const lib = import_ignore.default();
-    lib.add(await file.text());
+    lib.add(source);
     return { lib, root: directory };
   }
   if (directory === stopAt)

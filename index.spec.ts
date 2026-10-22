@@ -2,7 +2,7 @@ import {test, expect, describe, beforeAll} from "bun:test"
 import OpenCodeIgnore from "./index"
 import path from "path"
 import os from "node:os"
-import {mkdtemp, rm} from "node:fs/promises"
+import {mkdtemp, rm, writeFile} from "node:fs/promises"
 
 // Test data directory is the project root for all tests
 const TEST_PROJECT_ROOT = path.join(process.cwd(), "test-data")
@@ -111,6 +111,28 @@ describe("Ignore File Loading", () => {
       .rejects.toThrow(/Access denied/)
     await expect(callBefore(hooks, "read", {path: "allowed.txt"}))
       .resolves.toBeUndefined()
+  })
+
+  test("does not require the Bun global (desktop app)", async () => {
+    const tempDir = await mkdtemp(path.join(os.tmpdir(), "opencode-ignore-desktop-"))
+    const original = Bun.file
+
+    try {
+      await writeFile(path.join(tempDir, ".ignore"), "blocked.txt\n")
+      const hooks = await createHooks(tempDir)
+
+      // The desktop app does not expose the Bun global; any use of Bun.file
+      // must fail the way it does there.
+      Bun.file = (() => {
+        throw new ReferenceError("Bun is not defined")
+      }) as typeof Bun.file
+
+      await expect(callBefore(hooks, "read", {path: "blocked.txt"}))
+        .rejects.toThrow(/Access denied/)
+    } finally {
+      Bun.file = original
+      await rm(tempDir, {recursive: true, force: true})
+    }
   })
 
   test("discovers .ignore upward when started in a subdirectory", async () => {
