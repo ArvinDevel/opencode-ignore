@@ -1,8 +1,17 @@
 # opencode-ignore
 
-OpenCode v1 plugin to restrict AI access to files and directories using `.ignore` patterns (gitignore-style).
+OpenCode plugin to restrict AI access to files and directories using `.ignore` patterns (gitignore-style).
 
 > **Disclaimer:** `opencode-ignore` is an independent project. It is not built by the OpenCode team and is not affiliated with OpenCode.
+
+## Compatibility
+
+| opencode-ignore | OpenCode |
+| --- | --- |
+| `2.x` | `2.x` |
+| `1.x` | `1.x` |
+
+OpenCode V1 plugins do not run in V2, so upgrade the plugin when you upgrade OpenCode.
 
 ## Usage
 
@@ -11,7 +20,7 @@ Add to your OpenCode configuration (`~/.config/opencode/opencode.json`):
 ```json
 {
   "$schema": "https://opencode.ai/config.json",
-  "plugin": [
+  "plugins": [
     "opencode-ignore"
   ]
 }
@@ -86,11 +95,11 @@ foo      # Blocks file "foo" OR directory "foo/"
 foo/     # Only blocks directory "foo/"
 ```
 
-**Important**: Pattern `**/node_modules/**` blocks files *inside* the directory, not the directory itself.
+**Important**: Pattern `**/node_modules/**` blocks files *inside* the directory, not the directory itself. Use `**/node_modules/` or `**/node_modules` if you also want to block listing the directory.
 
 ## Example Patterns
 
-See `example/.ignore` for comprehensive examples:
+See `test-data/.ignore` for a comprehensive example:
 
 ```gitignore
 # Block specific paths
@@ -134,7 +143,7 @@ api-keys.json
 The plugin protects the following OpenCode native tools:
 
 ### File Operations (Pre-execution blocking)
-- `read` - Blocks reading blocked files
+- `read` - Blocks reading blocked files and listing blocked directories
 - `write` - Blocks writing to blocked paths
 - `edit` - Blocks editing blocked files
 
@@ -142,33 +151,41 @@ The plugin protects the following OpenCode native tools:
 - `glob` - Blocks searching in blocked directories, filters blocked files from results
 - `grep` - Blocks searching in blocked directories, filters matches from blocked files
 
-### List Operations (Pre-execution blocking)
-- `list` - Blocks listing blocked directories
-
 **Protection Levels**:
-- **Pre-execution**: Prevents tool from accessing blocked paths entirely (read, write, edit, list)
-- **Post-execution**: Allows search but filters blocked files from results (glob, grep)
-- This two-phase approach prevents both direct access and information disclosure
+- **Pre-execution**: Prevents tools from accessing blocked paths entirely (read, write, edit)
+- **Post-execution**: Allows searches in allowed directories, then removes blocked files from both the structured result and the model-facing text
+- This two-phase approach prevents direct access and information disclosure
 
-**Note**: Project root (`.`) is always accessible to prevent blocking entire project.
+**Note**: Project root (`.`) is always accessible to prevent blocking the entire project.
+
+## Scope and Limitations
+
+This plugin is a guardrail for the built-in file and search tools, **not a sandbox**:
+
+- Shell commands (`shell`) are not inspected. A command such as `cat secrets.json` is not blocked by this plugin.
+- Paths that cannot be resolved inside the project (for example, external absolute paths) fail closed: they are treated as blocked.
+- If `.ignore` is missing, all access is allowed.
+- Paths are matched by the `ignore` library, so pattern semantics are exactly gitignore semantics.
+
+For a hard security boundary, combine this plugin with OS-level sandboxing and keep secrets out of the agent's filesystem scope.
 
 ## How It Works
 
 ### Pre-execution Protection
-1. Plugin loads `.ignore` file from project root before tool execution
-2. Tool paths are normalized to relative paths from project root
+1. Plugin loads `.ignore` from the project root before tool execution
+2. Tool paths are normalized to relative paths from the project root
 3. Paths are checked against ignore patterns using the `ignore` library
-4. If matched, tool execution is blocked with clear error message
+4. If matched, tool execution is blocked with a clear error message
 
 ### Post-execution Filtering (glob/grep)
-For `glob` and `grep` tools, additional protection filters results:
+For `glob` and `grep`, additional protection filters results:
 1. Tool executes normally (searching allowed directories)
-2. Results are filtered to remove any files matching `.ignore` patterns
-3. Blocked files are completely removed from output (no partial data leakage)
-4. Empty results returned if all matches are filtered
+2. Blocked entries are removed from the structured `output`
+3. Model-facing `content` is rebuilt from the remaining entries, so blocked paths do not leak through the rendered text
+4. Empty results are returned if all entries are filtered
 
 ### Graceful Degradation
-- If `.ignore` missing, all access is allowed
+- If `.ignore` is missing, all access is allowed
 - Project root (`.`) is always accessible
 
 ### Error Messages
@@ -183,7 +200,7 @@ Access denied: path/to/file blocked by ignore file. Do NOT try to read this. Acc
 The plugin handles various path formats:
 
 - **Absolute paths**: Converted to relative from project root
-- **Relative paths**: Used directly
+- **Relative paths**: Resolved against the active OpenCode directory
 - **Paths with `./`**: Prefix removed (ignore library requirement)
 - **Win32 backslashes**: Auto-converted to forward slashes
 - **Directory paths**: Trailing `/` added when needed
@@ -204,6 +221,7 @@ Tests cover:
 - Path normalization edge cases
 - All supported native tools
 - Missing `.ignore` graceful degradation
+- `glob`/`grep` output and content filtering
 
 ## Development
 
@@ -214,8 +232,11 @@ bun install
 # Run tests
 bun test
 
-# Build (if needed)
-bun build index.ts
+# Type-check
+bunx tsc --noEmit
+
+# Build
+bun run build
 ```
 
 ## License
